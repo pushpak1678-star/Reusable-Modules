@@ -1,0 +1,192 @@
+
+trigger:
+- main
+- branch/*
+
+pool: Self-Hosted-Dev
+
+
+# ALL the Secrets are Defined in Variable Group.
+
+variables:
+  - group: Prod-env-var-group
+
+parameters:
+  - name: tflint
+    displayName: tflint
+    type: boolean
+    default: true
+  
+  - name: tfsec
+    displayName: tfsec
+    type: boolean
+    default: true
+
+  - name: Infracost
+    displayName: infracost
+    type: boolean
+    default: true
+
+  - name: Infra
+    displayName: Which infra to run
+    type: string
+    values:
+      - Preprod
+      - Uat 
+    default: Preprod
+
+
+#---------------------------------------------
+#    TFlint
+#---------------------------------------------
+stages:
+  - stage: tflint
+    displayName: Tflint
+    condition: eq(${{ parameters.tflint }}, true)
+    jobs:
+      - job: tflint
+        displayName: TFlint
+        steps:
+        - task: PowerShell@2
+          inputs:
+            targetType: 'inline'
+            script: 'tflint --chdir="$(WorkingDirectory)" --recursive '
+
+#----------------------------------------------
+#     tfsec
+#----------------------------------------------
+
+  - stage: Tfsec
+    displayName: Tfsec
+    condition: eq(${{ parameters.tfsec }}, true)
+    jobs:
+      - job: Tfsec
+        displayName: Tfsec
+        steps:
+        - task: PowerShell@2
+          inputs:
+            targetType: 'inline'
+            script: 'tfsec .'
+
+#----------------------------------------------
+#             InfraCost
+#----------------------------------------------
+
+  - stage: infracost
+    displayName: Infracost
+    condition: eq(${{ parameters.Infracost }}, true)
+    jobs:
+      - job: Infracost
+        displayName: Infracost
+        steps:
+        - task: PowerShell@2
+          inputs:
+            targetType: 'inline'
+            script: 'infracost breakdown --path .'
+
+#-----------------------------------------------
+#     Terraform InIt & Validate & Plan
+#-----------------------------------------------
+
+  - stage: terraformInit
+    displayName: terreformInit
+    dependsOn: []
+    condition: succeeded()
+    jobs:
+      - job: TerrafromInitValidate
+        displayName: TerraformInIt & validate
+        steps:
+        - task: TerraformTask@5
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            workingDirectory: '$(WorkingDirectory)'
+            backendAzureRmUseEntraIdForAuthentication: false
+            backendServiceArm: '$(backendServiceArm)'
+            backendAzureRmResourceGroupName: '$(backendAzureRmResourceGroupName)'
+            backendAzureRmStorageAccountName: '$(backendAzureRmStorageAccountName)'
+            backendAzureRmContainerName: '$(backendAzureRmContainerName)'
+            backendAzureRmKey: '$(backendAzureRmKey)'
+        - task: TerraformTask@5
+          displayName: Terraform Validate
+          inputs:
+            provider: 'azurerm'
+            command: 'validate'
+            workingDirectory: '$WorkingDirectory'
+        - task: TerraformTask@5
+          displayName: Terraform Plan
+          inputs:
+            provider: 'azurerm'
+            command: 'plan'
+            workingDirectory: '$(WorkingDirectory)'
+            environmentServiceNameAzureRM: '$(backendServiceArm)'
+            commandOptions: '-out=$(Build.ArtifactStagingDirectory)/terraform.tfplan'
+        - task: PublishPipelineArtifact@1
+          displayName: Publish Terraform Plan
+          inputs:
+            targetPath: '$(Build.ArtifactStagingDirectory)'
+            artifact: 'terraform-plan'
+            publishLocation: 'pipeline'
+
+#-----------------------------------------------------
+#      Manual Validation
+#-----------------------------------------------------
+
+  - stage: ManualValidation
+    displayName: Wait for the Approval
+    dependsOn: terraformInit
+    jobs:
+      - job: ManualV
+        displayName: Manual Validation
+        pool: Server
+        steps:
+        - task: ManualValidation@1
+          inputs:
+            notifyUsers: 'abc@gmail.com'
+            instructions: 'Please review the Terraform plan and approve or reject.'
+
+#------------------------------------------------
+#     Terraform Apply
+#------------------------------------------------
+  - stage: TerraformApply
+    displayName: Terraform Apply
+    dependsOn: ManualValidation
+    condition: and(
+              succeeded(),eq(variables['Build.SourceBranch'], 'refs/heads/main')
+              )
+    jobs:
+      - job: TerraformApply
+        displayName: Terraform Plan & Apply
+        steps:
+        - task: TerraformTask@5
+          displayName: Terraform Init
+          inputs:
+            provider: 'azurerm'
+            command: 'init'
+            workingDirectory: '$(WorkingDirectory)'
+            backendAzureRmUseEntraIdForAuthentication: false
+            backendServiceArm: '$(backendServiceArm)'
+            backendAzureRmResourceGroupName: '$(backendAzureRmResourceGroupName)'
+            backendAzureRmStorageAccountName: '$(backendAzureRmStorageAccountName)'
+            backendAzureRmContainerName: '$(backendAzureRmContainerName)'
+            backendAzureRmKey: '$(backendAzureRmKey)'
+        - task: TerraformTask@5
+          displayName: Terraform Plan
+          inputs:
+            provider: 'azurerm'
+            command: 'plan'
+            workingDirectory: '$(WorkingDirectory)'
+            environmentServiceNameAzureRM: '$(backendServiceArm)'
+       
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            artifact: 'terraform-plan'
+            path: '$(Pipeline.Workspace)/terraform-plan'
+        - task: TerraformTask@5
+          displayName: Terraform Apply With the Artifacts
+          inputs:
+            provider: 'azurerm'
+            command: 'apply'
+            workingDirectory: '$(WorkingDirectory)'
+            environmentServiceNameAzureRM: '$(backendServiceArm)'
+            commandOptions: '$(Pipeline.Workspace)/terraform-plan/terraform.tfplan'

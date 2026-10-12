@@ -1,0 +1,8 @@
+
+variable "vms" {
+  
+}
+
+variable "vmm" {
+  
+}
